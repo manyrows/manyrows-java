@@ -15,7 +15,7 @@ import java.util.Optional;
  * Bearer-token verification for server-side auth.
  *
  * <p>Mirrors the Go SDK's {@code auth.Middleware} pattern: validate the
- * user's JWT against the ManyRows {@code /a/app/me} endpoint, then return
+ * user's JWT against the ManyRows {@code /a/me} endpoint, then return
  * the authenticated user ID.
  */
 public final class Auth {
@@ -28,7 +28,7 @@ public final class Auth {
 
     /**
      * Verify a user's bearer token by calling the ManyRows
-     * {@code /a/app/me} endpoint.
+     * {@code /a/me} endpoint.
      *
      * @return Optional containing the user ID on success; empty if the
      *         token is empty or rejected by ManyRows (401/403).
@@ -130,7 +130,7 @@ public final class Auth {
 
     static String meUrl(String baseUrl, String workspaceSlug, String appId) {
         String base = stripTrailingSlashes(baseUrl);
-        return base + "/x/" + workspaceSlug + "/apps/" + appId + "/a/app/me";
+        return base + "/x/" + workspaceSlug + "/apps/" + appId + "/a/me";
     }
 
     static String stripTrailingSlashes(String s) {

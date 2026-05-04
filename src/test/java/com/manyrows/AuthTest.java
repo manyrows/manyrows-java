@@ -127,7 +127,7 @@ class AuthTest {
             ));
             Auth.verifyToken("tok", "https://app.manyrows.com///", WORKSPACE, APP_ID, t);
             assertEquals(
-                    "https://app.manyrows.com/x/acme/apps/app_123/a/app/me",
+                    "https://app.manyrows.com/x/acme/apps/app_123/a/me",
                     t.captured().get(0).uri().toString()
             );
         }
@@ -138,7 +138,7 @@ class AuthTest {
     @Test
     void meUrlBuildsExpectedPath() {
         assertEquals(
-                "https://app.manyrows.com/x/acme/apps/app_123/a/app/me",
+                "https://app.manyrows.com/x/acme/apps/app_123/a/me",
                 Auth.meUrl("https://app.manyrows.com", "acme", "app_123")
         );
     }
