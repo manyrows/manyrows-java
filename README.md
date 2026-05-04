@@ -10,7 +10,7 @@ This SDK is **not yet on Maven Central**. Two options:
 
 ### Use the source directly (recommended)
 
-Copy the files in `src/main/java/com/manyrows/` into your project. There are only 5: `Client`, `Auth`, `HttpTransport`, `ManyRowsException`, `Types`. Already use Jackson? You're done. Otherwise add to your `pom.xml`:
+Copy the files in `src/main/java/com/manyrows/` into your project. There are 8: `Client`, `BffClient`, `PublicProxy`, `OAuthCallbackHtml`, `Auth`, `HttpTransport`, `ManyRowsException`, `Types`. Already use Jackson? You're done. Otherwise add to your `pom.xml`:
 
 ```xml
 <dependency>
@@ -112,10 +112,167 @@ try {
 `ManyRowsException` extends `RuntimeException` (unchecked) so callers don't
 need to declare `throws`. Network errors are wrapped into the same exception.
 
+## BFF Client (full-BFF mode)
+
+`BffClient` calls the ManyRows `/bff/*` server-to-server endpoints — the
+"full-BFF" deployment posture where the browser never sees a token, only an
+HttpOnly session cookie set by your backend that carries an opaque ManyRows
+session ID. AppKit running in the browser hits relative paths on your
+server (`/auth/login`, `/auth/google`, `/auth/verify`, `/auth/totp/verify`,
+`/auth/passkey/login/{begin,finish}`, `/auth/oauth/callback`,
+`/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`,
+`/apps/{appId}/a/*` for authed data calls), and your handlers forward each
+to ManyRows via `BffClient`.
+
+Authenticates with HTTP Basic. Always pass through the real browser IP and
+User-Agent so per-IP rate limits and audit logs in ManyRows attribute to
+the actual user instead of your egress IP.
+
+```java
+import com.manyrows.BffClient;
+import com.manyrows.Types.BffSession;
+
+BffClient bff = new BffClient(
+    "https://app.manyrows.com",
+    System.getenv("MANYROWS_BFF_CLIENT_ID"),
+    System.getenv("MANYROWS_BFF_CLIENT_SECRET"));
+
+// Inside your /auth/login handler:
+BffSession s = bff.loginPassword(
+    body.email, body.password, body.rememberMe,
+    request.getRemoteAddr(),
+    request.getHeader("User-Agent"));
+
+if (s.isTotpRequired()) {
+    // Reply with {totpRequired: true, challengeToken: s.challengeToken()}.
+    // The browser shows the TOTP form, then your /auth/totp/verify handler
+    // calls bff.verifyTotp(s.challengeToken(), code, ip, ua).
+    return;
+}
+
+// Stash s.sessionId() in your own HttpOnly session cookie and respond 200.
+sessionStore.put(httpSession, "manyrowsSessionId", s.sessionId());
+```
+
+### Forwarding authed AppKit data calls
+
+```java
+// Your /apps/{appId}/a/* handler:
+String sessionId = sessionStore.get(httpSession, "manyrowsSessionId");
+BffClient.ProxyResponse r = bff.proxyGet(
+    sessionId,
+    "/me",                                  // path within the proxy
+    request.getRemoteAddr(),
+    request.getHeader("User-Agent"));
+response.setStatus(r.status());
+response.getWriter().write(r.body());
+```
+
+POST/PUT/PATCH/DELETE: `bff.proxyPost(sessionId, path, body, ip, ua)` etc.
+
+### Other login flows
+
+```java
+// Google ID token from GSI:
+BffSession s = bff.loginGoogle(idToken, rememberMe, ip, ua);
+
+// Email-OTP verify (registration when appId is non-null):
+BffSession s = bff.verifyOtp(email, code, appId, rememberMe, ip, ua);
+if (s.isPasswordAlreadySet()) {
+    // Existing user re-verifying — skip the "set your password" screen.
+}
+
+// Passkey:
+JsonNode begin = bff.passkeyLoginBegin(ip, ua);   // pass straight to the browser
+BffSession s = bff.passkeyLoginFinish(challengeId, response, rememberMe, ip, ua);
+
+// Apple/Microsoft/GitHub OAuth callback (after ManyRows redirects to your
+// /auth/oauth/callback?code=...). See `OAuthCallbackHtml` below for the
+// popup-aware response page AppKit expects.
+BffSession s = bff.exchangeAuthCode(code, redirectUri, ip, ua);
+
+// Logout:
+bff.logout(sessionId, ip, ua);
+sessionStore.remove(httpSession, "manyrowsSessionId");
+```
+
+### Popup-aware OAuth callback HTML
+
+AppKit's bffMode opens Apple/Microsoft/GitHub sign-in in a popup. After
+ManyRows redirects the popup to your `/auth/oauth/callback?code=...`,
+your handler must serve a specific HTML page that postMessages the
+opener (or, when there's no opener, redirects the current tab). Use
+`OAuthCallbackHtml` for that:
+
+```java
+import com.manyrows.OAuthCallbackHtml;
+
+// Inside /auth/oauth/callback handler:
+String code = req.getParameter("code");
+String error = req.getParameter("error");
+String html;
+
+if (error != null) {
+    html = OAuthCallbackHtml.error(error, "/login?failed=1");
+} else {
+    try {
+        BffSession s = bff.exchangeAuthCode(code, redirectUri, ip, ua);
+        if (s.isTotpRequired()) {
+            html = OAuthCallbackHtml.totp(s.challengeToken(), "/login/totp", "/login?failed=1");
+        } else {
+            sessionStore.put(httpSession, "manyrowsSessionId", s.sessionId());
+            html = OAuthCallbackHtml.success(s.userId(), s.isTotpSetupRequired(), "/");
+        }
+    } catch (ManyRowsException ex) {
+        html = OAuthCallbackHtml.error("exchange_failed", "/login?failed=1");
+    }
+}
+res.setContentType("text/html; charset=utf-8");
+res.setHeader("Cache-Control", "no-store");
+res.getWriter().write(html);
+```
+
+### Public proxies for AppKit boot + pre-login auth
+
+AppKit also hits two unauthenticated endpoints on your backend that
+forward to ManyRows: `/apps/{appId}` (public app config) and
+`/apps/{appId}/auth/*` (OAuth authorize, OTP request, password reset
+discovery, etc.). Use `PublicProxy`:
+
+```java
+import com.manyrows.PublicProxy;
+
+PublicProxy pp = new PublicProxy("https://app.manyrows.com", "your-workspace");
+
+// Inside /apps/{appId} GET handler:
+PublicProxy.Response r = pp.appBootGet(appId);
+res.setStatus(r.status());
+res.setContentType(r.contentType());
+res.getWriter().write(r.body());
+
+// Inside /apps/{appId}/auth/{rest...} catch-all:
+String suffix = req.getRequestURI().substring(("/apps/" + appId + "/auth").length());
+String body = "POST".equals(req.getMethod()) ? readBody(req) : null;
+PublicProxy.Response r = pp.authForward(
+    appId, req.getMethod(), suffix, req.getQueryString(), body, req.getContentType());
+res.setStatus(r.status());
+res.setContentType(r.contentType());
+res.getWriter().write(r.body());
+```
+
+### Session cookie security
+
+`BffClient` returns the session ID; you store it in a browser-facing
+cookie. Mark that cookie **HttpOnly + Secure + SameSite=Strict** —
+servlet `HttpSession` (Spring, Jetty, Tomcat) defaults to HttpOnly and
+SameSite=Lax; flip to Strict for `/auth/*` paths. If you set the cookie
+manually, set all three flags explicitly. Without them an XSS or
+CSRF on the customer's domain hands the attacker a usable session ID.
+
 ## Auth helpers
 
 Validate bearer tokens from your end users by calling the ManyRows
-`/a/app/me` endpoint, then read the user ID.
+`/a/me` endpoint, then read the user ID.
 
 ```java
 import com.manyrows.Auth;
