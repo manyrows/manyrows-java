@@ -78,8 +78,11 @@ public class PublicProxy {
     }
 
     /**
-     * GET /x/{workspaceSlug}/apps/{appId}. The public boot endpoint for
-     * AppKit's bffMode initialisation.
+     * GET /x/{workspaceSlug}/apps/{appId}. The public app-config endpoint
+     * AppKit fetches on every page load — no longer routed through the
+     * BFF backend; AppKit hits ManyRows directly via CORS to discover
+     * whether BFF mode is enabled. Provided here for tooling that wants
+     * to fetch the same config server-side.
      */
     public Response appBootGet(String appId) {
         if (appId == null || appId.isEmpty()) {
