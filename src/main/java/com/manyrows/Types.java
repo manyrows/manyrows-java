@@ -18,12 +18,21 @@ public final class Types {
 
     // ===== Delivery =====
 
+    /**
+     * Config or feature-flag value. For entries under
+     * {@link DeliveryConfig#secrets}, {@code value} is always
+     * {@code null}; instead {@code envelope} carries the encrypted
+     * payload — pass to {@link Secrets#decryptSecret} along with your
+     * workspace private JWK to recover the plaintext. Only set when
+     * {@code isSet} is {@code true}.
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record ConfigItem(
             String key,
             String type,
             Object value,
-            Boolean isSet
+            Boolean isSet,
+            Object envelope
     ) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)

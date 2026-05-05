@@ -58,6 +58,36 @@ Delivery delivery = client.getDelivery();
 keys map to `publicItems()` / `privateItems()` accessors. The wire format is
 unchanged.)
 
+### Decrypt secrets
+
+Secret values are returned as encrypted envelopes. Decrypt them with
+your workspace private key (downloaded once when you generated the
+workspace key in the admin UI):
+
+```java
+import com.manyrows.Secrets;
+import com.manyrows.Types.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+String privateKeyJwkJson = System.getenv("MANYROWS_WORKSPACE_PRIVATE_KEY");
+Delivery delivery = client.getDelivery();
+ObjectMapper mapper = new ObjectMapper();
+
+for (ConfigItem sec : delivery.config().secrets()) {
+    if (!Boolean.TRUE.equals(sec.isSet()) || sec.envelope() == null) continue;
+    byte[] plaintext = Secrets.decryptSecret(sec.envelope(), privateKeyJwkJson);
+    // plaintext is JSON-encoded. For a string secret you'll get
+    // `"hello"` (with quotes) — parse with Jackson to recover.
+    String value = mapper.readValue(plaintext, String.class);
+}
+```
+
+The private key never leaves your server — secrets are decrypted in
+process. See `src/main/java/com/manyrows/Secrets.java` for the full
+algorithm (ECDH P-256 + HKDF-SHA256 + AES-256-GCM). On JDK 17 we
+implement HKDF directly on top of `Mac` since stdlib HKDF only
+arrived in 21+.
+
 ### Check permission
 
 ```java
