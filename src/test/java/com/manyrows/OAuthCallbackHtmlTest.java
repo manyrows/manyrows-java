@@ -1,6 +1,11 @@
 package com.manyrows;
 
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -88,5 +93,120 @@ class OAuthCallbackHtmlTest {
         // decode '+' as space in query values, so functionally equivalent
         // to %20 for our use case.
         assertEquals("/x?a=hello+world", OAuthCallbackHtml.appendQuery("/x", "a", "hello world"));
+    }
+
+    @Nested
+    class Dispatch {
+        private static final String BASE = "https://app.manyrows.com";
+        private static final String REDIRECT = "https://yourapp.com/auth/oauth/callback";
+        private static final String SUCCESS = "/";
+        private static final String ERR = "/login?failed=1";
+        private static final String TOTP = "/login/totp";
+
+        private BffClient newBff(MockTransport t) {
+            return new BffClient(BASE, "cid", "csecret", t);
+        }
+
+        private Map<String, String> q(String... kv) {
+            Map<String, String> m = new LinkedHashMap<>();
+            for (int i = 0; i + 1 < kv.length; i += 2) m.put(kv[i], kv[i + 1]);
+            return m;
+        }
+
+        @Test
+        void errorBranchShortCircuits() {
+            MockTransport t = new MockTransport(List.of()); // no upstream call
+            OAuthCallbackHtml.Outcome out = OAuthCallbackHtml.dispatch(
+                    q("error", "provider_exchange_failed"),
+                    newBff(t), REDIRECT, SUCCESS, ERR, TOTP, "1.2.3.4", "ua");
+            assertInstanceOf(OAuthCallbackHtml.Error.class, out);
+            assertEquals("provider_exchange_failed", ((OAuthCallbackHtml.Error) out).error());
+            assertTrue(out.html().contains("provider_exchange_failed"));
+            assertEquals(0, t.captured().size());
+        }
+
+        @Test
+        void challengeRequiredShortCircuits() {
+            MockTransport t = new MockTransport(List.of());
+            OAuthCallbackHtml.Outcome out = OAuthCallbackHtml.dispatch(
+                    q("challengeRequired", "1", "challengeToken", "ct_abc", "state", "s"),
+                    newBff(t), REDIRECT, SUCCESS, ERR, TOTP, "1.2.3.4", "ua");
+            assertInstanceOf(OAuthCallbackHtml.Totp.class, out);
+            assertEquals("ct_abc", ((OAuthCallbackHtml.Totp) out).challengeToken());
+            assertTrue(out.html().contains("\"totpRequired\":true"));
+            assertTrue(out.html().contains("/login/totp?challengeToken=ct_abc"));
+            assertEquals(0, t.captured().size());
+        }
+
+        @Test
+        void missingCodeWhenQueryIsEmpty() {
+            MockTransport t = new MockTransport(List.of());
+            OAuthCallbackHtml.Outcome out = OAuthCallbackHtml.dispatch(
+                    q(), newBff(t), REDIRECT, SUCCESS, ERR, TOTP, "1.2.3.4", "ua");
+            assertInstanceOf(OAuthCallbackHtml.Error.class, out);
+            assertEquals("missing_code", ((OAuthCallbackHtml.Error) out).error());
+        }
+
+        @Test
+        void successReturnsSessionAndHtml() {
+            MockTransport t = new MockTransport(List.of(
+                    MockTransport.Reply.ok(
+                            "{\"sessionId\":\"sess_123\",\"userId\":\"u_42\",\"expiresAt\":\"2030-01-01T00:00:00Z\"}")));
+            OAuthCallbackHtml.Outcome out = OAuthCallbackHtml.dispatch(
+                    q("code", "abc123", "state", "s"),
+                    newBff(t), REDIRECT, SUCCESS, ERR, TOTP, "1.2.3.4", "ua");
+            assertInstanceOf(OAuthCallbackHtml.Success.class, out);
+            OAuthCallbackHtml.Success s = (OAuthCallbackHtml.Success) out;
+            assertEquals("sess_123", s.session().sessionId());
+            assertEquals("u_42", s.session().userId());
+            assertTrue(out.html().contains("\"userId\":\"u_42\""));
+        }
+
+        @Test
+        void postExchangeTotpRequired() {
+            MockTransport t = new MockTransport(List.of(
+                    MockTransport.Reply.ok("{\"totpRequired\":true,\"challengeToken\":\"ct_xyz\"}")));
+            OAuthCallbackHtml.Outcome out = OAuthCallbackHtml.dispatch(
+                    q("code", "abc123"),
+                    newBff(t), REDIRECT, SUCCESS, ERR, TOTP, "1.2.3.4", "ua");
+            assertInstanceOf(OAuthCallbackHtml.Totp.class, out);
+            assertEquals("ct_xyz", ((OAuthCallbackHtml.Totp) out).challengeToken());
+        }
+
+        @Test
+        void exchangeErrorSurfacesUpstreamCode() {
+            MockTransport t = new MockTransport(List.of(
+                    MockTransport.Reply.status(401, "{\"error\":\"exchange_token_invalid\"}")));
+            OAuthCallbackHtml.Outcome out = OAuthCallbackHtml.dispatch(
+                    q("code", "abc123"),
+                    newBff(t), REDIRECT, SUCCESS, ERR, TOTP, "1.2.3.4", "ua");
+            assertInstanceOf(OAuthCallbackHtml.Error.class, out);
+            assertEquals("exchange_token_invalid", ((OAuthCallbackHtml.Error) out).error());
+        }
+
+        @Test
+        void exchangeErrorFallsBackWhenBodyIsNotJson() {
+            MockTransport t = new MockTransport(List.of(
+                    MockTransport.Reply.status(500, "not json")));
+            OAuthCallbackHtml.Outcome out = OAuthCallbackHtml.dispatch(
+                    q("code", "abc123"),
+                    newBff(t), REDIRECT, SUCCESS, ERR, TOTP, "1.2.3.4", "ua");
+            assertInstanceOf(OAuthCallbackHtml.Error.class, out);
+            assertEquals("exchange_failed", ((OAuthCallbackHtml.Error) out).error());
+        }
+
+        @Test
+        void firstValueFlattensServletParamMap() {
+            Map<String, String[]> params = new LinkedHashMap<>();
+            params.put("code", new String[]{"abc123"});
+            params.put("state", new String[]{"s1", "s2"});
+            params.put("empty", new String[]{});
+            params.put("nullVal", null);
+            Map<String, String> flat = OAuthCallbackHtml.firstValue(params);
+            assertEquals("abc123", flat.get("code"));
+            assertEquals("s1", flat.get("state"));
+            assertFalse(flat.containsKey("empty"));
+            assertFalse(flat.containsKey("nullVal"));
+        }
     }
 }

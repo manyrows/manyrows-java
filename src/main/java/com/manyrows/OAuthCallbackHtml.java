@@ -1,7 +1,10 @@
 package com.manyrows;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+
+import com.manyrows.Types.BffSession;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -161,6 +164,136 @@ public final class OAuthCallbackHtml {
                 + "</script>\n"
                 + "</body>\n"
                 + "</html>";
+    }
+
+    /**
+     * Discriminated outcome of {@link #dispatch}. Customer's handler writes
+     * {@link #html()} to the response; on the {@code success} branch it also
+     * issues a session cookie carrying {@link Success#session()}'s
+     * {@code sessionId}. The {@code totp} and {@code error} branches are
+     * cookie-less by design.
+     */
+    public sealed interface Outcome permits Success, Totp, Error {
+        /** The popup-aware HTML page to write to the response body. */
+        String html();
+    }
+
+    /** Successful login — write the session cookie before returning {@link #html()}. */
+    public record Success(String html, BffSession session) implements Outcome {}
+
+    /** TOTP step-up required — no cookie; AppKit's listener routes the user to the TOTP screen. */
+    public record Totp(String html, String challengeToken) implements Outcome {}
+
+    /** Error — surface {@link #error()} to telemetry; AppKit's listener echoes it. */
+    public record Error(String html, String error) implements Outcome {}
+
+    /**
+     * Single entry point for {@code /auth/oauth/callback}. Mirrors the
+     * manyrows-go {@code Handlers.OAuthCallback}: parses the query
+     * (error / challengeRequired / code), exchanges the auth code via
+     * {@link BffClient#exchangeAuthCode} when present, and returns an
+     * {@link Outcome} carrying the popup-aware HTML the customer should
+     * write — plus the parsed session on success so the customer's
+     * framework can issue its own cookie.
+     *
+     * <p>Pulls each query param from {@code query} via {@link Map#get};
+     * pass a map view of {@code request.getParameterMap()} (just call
+     * {@link #firstValue} on it) or any equivalent.
+     *
+     * <p>Customer pattern (Spring shown — servlets identical):
+     *
+     * <pre>{@code
+     * Map<String, String> q = OAuthCallbackHtml.firstValue(request.getParameterMap());
+     * OAuthCallbackHtml.Outcome out = OAuthCallbackHtml.dispatch(
+     *     q, bff, redirectUri, "/", "/login?failed=1", "/login/totp",
+     *     request.getRemoteAddr(), request.getHeader("User-Agent"));
+     *
+     * if (out instanceof OAuthCallbackHtml.Success s) {
+     *     Cookie c = new Cookie("session", s.session().sessionId());
+     *     c.setHttpOnly(true); c.setSecure(true); c.setPath("/");
+     *     response.addCookie(c);
+     * }
+     * response.setContentType("text/html; charset=utf-8");
+     * response.getWriter().write(out.html());
+     * }</pre>
+     *
+     * @param query parsed query-string params (use {@link #firstValue} to
+     *              flatten servlet's {@code Map<String, String[]>}).
+     * @param totpRedirectUrl pass {@code ""} if your app doesn't have a
+     *                        dedicated TOTP screen — totp branch falls
+     *                        back to the error redirect.
+     */
+    public static Outcome dispatch(
+            Map<String, String> query,
+            BffClient bff,
+            String redirectUri,
+            String successRedirectUrl,
+            String errorRedirectUrl,
+            String totpRedirectUrl,
+            String clientIp,
+            String clientUserAgent) {
+        String errCode = trimOrEmpty(query.get("error"));
+        if (!errCode.isEmpty()) {
+            return new Error(error(errCode, errorRedirectUrl), errCode);
+        }
+        if ("1".equals(trimOrEmpty(query.get("challengeRequired")))) {
+            String ct = trimOrEmpty(query.get("challengeToken"));
+            return new Totp(totp(ct, totpRedirectUrl, errorRedirectUrl), ct);
+        }
+        String code = trimOrEmpty(query.get("code"));
+        if (code.isEmpty()) {
+            return new Error(error("missing_code", errorRedirectUrl), "missing_code");
+        }
+        BffSession session;
+        try {
+            session = bff.exchangeAuthCode(code, redirectUri, clientIp, clientUserAgent);
+        } catch (ManyRowsException e) {
+            String surfacedErr = exchangeErrorCode(e);
+            return new Error(error(surfacedErr, errorRedirectUrl), surfacedErr);
+        }
+        if (session.isTotpRequired()) {
+            String ct = session.challengeToken() == null ? "" : session.challengeToken();
+            return new Totp(totp(ct, totpRedirectUrl, errorRedirectUrl), ct);
+        }
+        return new Success(
+                success(session.userId(), session.isTotpSetupRequired(), successRedirectUrl),
+                session);
+    }
+
+    /**
+     * Flatten a servlet {@code Map<String, String[]>} into the first-value
+     * map {@link #dispatch} expects. Empty arrays map to {@code ""}; null
+     * values are skipped.
+     */
+    public static Map<String, String> firstValue(Map<String, String[]> params) {
+        Map<String, String> out = new LinkedHashMap<>(params.size());
+        for (Map.Entry<String, String[]> e : params.entrySet()) {
+            String[] vs = e.getValue();
+            if (vs != null && vs.length > 0 && vs[0] != null) {
+                out.put(e.getKey(), vs[0]);
+            }
+        }
+        return out;
+    }
+
+    private static String exchangeErrorCode(ManyRowsException e) {
+        String body = e.getBody();
+        if (body != null && !body.isEmpty()) {
+            try {
+                JsonNode parsed = MAPPER.readTree(body);
+                JsonNode err = parsed.get("error");
+                if (err != null && err.isTextual() && !err.asText().isEmpty()) {
+                    return err.asText();
+                }
+            } catch (JsonProcessingException ignored) {
+                // Body wasn't JSON — fall through to the generic code.
+            }
+        }
+        return "exchange_failed";
+    }
+
+    private static String trimOrEmpty(String s) {
+        return s == null ? "" : s.trim();
     }
 
     static String appendQuery(String base, String key, String value) {
