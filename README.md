@@ -356,6 +356,36 @@ HttpTransport transport = req -> http.send(req, HttpResponse.BodyHandlers.ofStri
 Client client = new Client(baseUrl, workspaceSlug, appId, apiKey, transport);
 ```
 
+## Webhook verification
+
+ManyRows signs every outbound webhook delivery. Use `Webhook.verify`
+on your receiver:
+
+```java
+import com.manyrows.Webhook;
+
+@PostMapping(value = "/webhooks/manyrows", consumes = MediaType.APPLICATION_JSON_VALUE)
+public ResponseEntity<?> webhook(
+        @RequestBody byte[] body,                    // raw bytes — not a DTO
+        @RequestHeader Map<String, String> headers) {
+    try {
+        Webhook.verify(secret, headers, body);
+    } catch (Webhook.InvalidException e) {
+        return ResponseEntity.status(401).body(Map.of("error", e.code()));
+    }
+    // body is verified — parse + process
+    return ResponseEntity.ok().build();
+}
+```
+
+`Webhook.verify` checks both the HMAC-SHA256 signature (over
+`<timestamp>.<body>`) and that `X-Webhook-Timestamp` is within
+±5 minutes of now. Pass `Webhook.Options.builder().tolerance(...).build()`
+to widen or tighten.
+
+Read the body as **raw bytes** before verifying — re-serializing
+parsed JSON changes whitespace and breaks the check.
+
 ## License
 
 [MIT](./LICENSE)
