@@ -10,13 +10,18 @@ This SDK is **not yet on Maven Central**. Two options:
 
 ### Use the source directly (recommended)
 
-Copy the files in `src/main/java/com/manyrows/` into your project. There are 8: `Client`, `BffClient`, `PublicProxy`, `OAuthCallbackHtml`, `Auth`, `HttpTransport`, `ManyRowsException`, `Types`. Already use Jackson? You're done. Otherwise add to your `pom.xml`:
+Copy the files in `src/main/java/com/manyrows/` into your project. There are 8: `Client`, `BffClient`, `PublicProxy`, `OAuthCallbackHtml`, `Auth`, `HttpTransport`, `ManyRowsException`, `Types`. Two runtime deps — Jackson for JSON, Nimbus for JWT/JWKS:
 
 ```xml
 <dependency>
     <groupId>com.fasterxml.jackson.core</groupId>
     <artifactId>jackson-databind</artifactId>
     <version>2.18.0</version>
+</dependency>
+<dependency>
+    <groupId>com.nimbusds</groupId>
+    <artifactId>nimbus-jose-jwt</artifactId>
+    <version>9.40</version>
 </dependency>
 ```
 
@@ -301,43 +306,42 @@ CSRF on the customer's domain hands the attacker a usable session ID.
 
 ## Auth helpers
 
-Validate bearer tokens from your end users by calling the ManyRows
-`/a/me` endpoint, then read the user ID.
+Verify the user's JWT **locally** against your install's JWKS. Fetches `${baseUrl}/.well-known/jwks.json` once on first verify, caches the keys in-process, refetches on a kid mismatch. No per-request round trip to ManyRows. Built on [`nimbus-jose-jwt`](https://connect2id.com/products/nimbus-jose-jwt) — the de-facto Java JOSE/JWT library.
+
+Two helpers extract the JWT from a request: `Auth.bearerToken(authorizationHeader)` reads the `Authorization` header and `Auth.mrAtCookie(cookieHeader)` reads the `mr_at` cookie that AppKit sets in cookie mode.
 
 ```java
 import com.manyrows.Auth;
 import java.util.Optional;
 
+// Try Authorization header first, then mr_at cookie (cookie-mode AppKit).
 Optional<String> token = Auth.bearerToken(request.getHeader("Authorization"));
+if (token.isEmpty()) {
+    token = Auth.mrAtCookie(request.getHeader("Cookie"));
+}
 if (token.isEmpty()) {
     response.setStatus(401);
     return;
 }
 
-Optional<String> userId;
-try {
-    userId = Auth.verifyToken(
-            token.get(),
-            "https://app.manyrows.com",
-            "your-workspace",
-            "your-app-id");
-} catch (ManyRowsException ex) {
-    response.setStatus(401); // fail closed on network errors
-    return;
-}
-
+Optional<String> userId = Auth.verifyToken(
+        token.get(),
+        "https://app.manyrows.com",
+        "your-workspace",
+        "your-app-id");
 if (userId.isEmpty()) {
     response.setStatus(401);
     return;
 }
 
-// userId.get() is the authenticated user ID.
+// userId.get() is the authenticated user ID (the JWT's sub claim).
 ```
 
 `verifyToken` returns:
-- `Optional.of(userId)` on success
-- `Optional.empty()` on rejection (401/403) or empty token
-- throws `ManyRowsException` on network errors or unexpected responses (5xx, malformed)
+- `Optional.of(userId)` on success — the JWT signature verified, exp/nbf are in range, and `sub` is non-empty
+- `Optional.empty()` for any verification failure (expired, malformed, wrong signature, missing `sub`, JWKS unreachable)
+
+It does NOT throw on auth-decision-equivalent conditions — fail-closed is the caller's job; `Optional.empty()` is the "not authenticated" signal.
 
 ### Spring (filter)
 
@@ -350,16 +354,13 @@ public class ManyRowsAuthFilter extends OncePerRequestFilter {
             throws IOException, ServletException {
         Optional<String> token = Auth.bearerToken(req.getHeader("Authorization"));
         if (token.isEmpty()) {
+            token = Auth.mrAtCookie(req.getHeader("Cookie"));
+        }
+        if (token.isEmpty()) {
             res.sendError(401);
             return;
         }
-        Optional<String> userId;
-        try {
-            userId = Auth.verifyToken(token.get(), baseUrl, workspaceSlug, appId);
-        } catch (ManyRowsException ex) {
-            res.sendError(401);
-            return;
-        }
+        Optional<String> userId = Auth.verifyToken(token.get(), baseUrl, workspaceSlug, appId);
         if (userId.isEmpty()) {
             res.sendError(401);
             return;
@@ -372,8 +373,7 @@ public class ManyRowsAuthFilter extends OncePerRequestFilter {
 
 ## Custom HTTP transport
 
-`Client` and `Auth.verifyToken` both accept an optional `HttpTransport` for
-testing, request tracing, or custom timeout / proxy / SSL configuration:
+`Client`, `BffClient`, and `PublicProxy` all accept an optional `HttpTransport` for testing, request tracing, or custom timeout / proxy / SSL configuration on their non-JWKS API calls:
 
 ```java
 HttpClient http = HttpClient.newBuilder()
@@ -385,6 +385,8 @@ HttpTransport transport = req -> http.send(req, HttpResponse.BodyHandlers.ofStri
 
 Client client = new Client(baseUrl, workspaceSlug, appId, apiKey, transport);
 ```
+
+`Auth.verifyToken` doesn't take an `HttpTransport` — its JWKS fetch goes through Nimbus's internal HTTP client. For tests, use the package-private `Auth.verifyToken(token, JWKSource)` overload with an in-memory `ImmutableJWKSet` (see `AuthTest` for examples).
 
 ## Webhook verification
 
