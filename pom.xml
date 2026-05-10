@@ -26,6 +26,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <jackson.version>2.18.0</jackson.version>
     <junit.version>5.10.2</junit.version>
+    <nimbus.version>9.40</nimbus.version>
   </properties>
 
   <dependencies>
@@ -33,6 +34,12 @@
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
       <version>${jackson.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>com.nimbusds</groupId>
+      <artifactId>nimbus-jose-jwt</artifactId>
+      <version>${nimbus.version}</version>
     </dependency>
 
     <dependency>
