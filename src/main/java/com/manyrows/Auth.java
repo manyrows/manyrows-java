@@ -201,9 +201,9 @@ public final class Auth {
     }
 
     /**
-     * Default HTTP transport used by the {@link Client}, {@link BffClient},
-     * and {@link PublicProxy} convenience constructors. Wraps Java's
-     * built-in {@link HttpClient} with a 10-second connect timeout.
+     * Default HTTP transport used by {@link Client}'s convenience
+     * constructor. Wraps Java's built-in {@link HttpClient} with a
+     * 10-second connect timeout.
      *
      * <p>Not used by {@link #verifyToken} — that path goes through
      * Nimbus's internal JWKS fetcher.
