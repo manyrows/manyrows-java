@@ -4,6 +4,11 @@ Official Java SDK for [ManyRows](https://manyrows.com). Mirrors the surface of [
 
 Requires **Java 17+**. One runtime dependency: [Jackson](https://github.com/FasterXML/jackson-databind).
 
+The examples below assume a self-hosted deployment at
+`https://manyrows.example.com`. Swap in whatever host your install
+runs on (`http://localhost:3000` for local development, your own
+domain in production).
+
 ## Install
 
 This SDK is **not yet on Maven Central**. Two options:
@@ -43,7 +48,7 @@ import com.manyrows.Client;
 import com.manyrows.Types.UserResult;
 
 Client client = new Client(
-    "https://app.manyrows.com",
+    "https://manyrows.example.com",
     "your-workspace",
     "your-app-id",
     System.getenv("MANYROWS_API_KEY"));
@@ -67,7 +72,7 @@ unchanged.)
 
 Secret values are returned as encrypted envelopes. Decrypt them with
 your workspace private key (downloaded once when you generated the
-workspace key in the admin UI):
+workspace key in your install's admin UI):
 
 ```java
 import com.manyrows.Secrets;
@@ -169,7 +174,7 @@ if (token.isEmpty()) {
 
 Optional<String> userId = Auth.verifyToken(
         token.get(),
-        "https://app.manyrows.com",
+        "https://manyrows.example.com",
         "your-workspace",
         "your-app-id");
 if (userId.isEmpty()) {
