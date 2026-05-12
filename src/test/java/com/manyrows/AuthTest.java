@@ -35,11 +35,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * AuthTest covers:
  * <ul>
  *   <li>{@link Auth#bearerToken(String)} — Authorization header parsing.</li>
- *   <li>{@link Auth#mrAtCookie(String)} — Cookie header parsing.</li>
+ *   <li>{@link Auth#mrAtCookie(String, String)} — Cookie header parsing.</li>
  *   <li>{@link Auth#verifyToken(String, String, String, String)} —
  *       end-to-end JWKS fetch + ES256 verification, exercised against a
  *       loopback {@link HttpServer} that serves a real JWKS payload.</li>
- *   <li>{@link Auth#verifyToken(String, JWKSource)} — the test seam
+ *   <li>{@link Auth#verifyToken(String, String, JWKSource)} — the test seam
  *       that takes an in-memory JWKSource (used for negative cases that
  *       don't need an HTTP round trip).</li>
  * </ul>
@@ -88,9 +88,14 @@ class AuthTest {
     }
 
     private String signToken(String sub, long expSecondsFromNow) throws JOSEException {
+        return signToken(sub, expSecondsFromNow, APP_ID);
+    }
+
+    private String signToken(String sub, long expSecondsFromNow, String aud) throws JOSEException {
         long now = System.currentTimeMillis() / 1000;
         JWTClaimsSet claims = new JWTClaimsSet.Builder()
                 .subject(sub)
+                .audience(aud)
                 .issueTime(new Date(now * 1000))
                 .expirationTime(new Date((now + expSecondsFromNow) * 1000))
                 .build();
@@ -139,28 +144,38 @@ class AuthTest {
     @Nested
     class MrAtCookie {
 
+        private static final String COOKIE_NAME = "mr_at_app_123";
+
         @Test
-        void extractsMrAtValue() {
-            assertEquals(Optional.of("abc123"), Auth.mrAtCookie("mr_at=abc123"));
+        void extractsPerAppValue() {
+            assertEquals(Optional.of("abc123"), Auth.mrAtCookie(COOKIE_NAME + "=abc123", APP_ID));
         }
 
         @Test
         void ignoresOtherCookiesAndWhitespace() {
-            assertEquals(Optional.of("abc"), Auth.mrAtCookie("foo=1; mr_at=abc; bar=2"));
-            assertEquals(Optional.of("abc"), Auth.mrAtCookie("  mr_at=abc  "));
+            assertEquals(Optional.of("abc"),
+                    Auth.mrAtCookie("foo=1; " + COOKIE_NAME + "=abc; bar=2", APP_ID));
+            assertEquals(Optional.of("abc"),
+                    Auth.mrAtCookie("  " + COOKIE_NAME + "=abc  ", APP_ID));
         }
 
         @Test
         void handlesValuesContainingEquals() {
-            assertEquals(Optional.of("eyJ.payload=xyz"), Auth.mrAtCookie("mr_at=eyJ.payload=xyz"));
+            assertEquals(Optional.of("eyJ.payload=xyz"),
+                    Auth.mrAtCookie(COOKIE_NAME + "=eyJ.payload=xyz", APP_ID));
+        }
+
+        @Test
+        void ignoresADifferentAppsCookie() {
+            assertTrue(Auth.mrAtCookie("mr_at_app_other=abc", APP_ID).isEmpty());
         }
 
         @Test
         void returnsEmptyWhenAbsentOrEmpty() {
-            assertTrue(Auth.mrAtCookie(null).isEmpty());
-            assertTrue(Auth.mrAtCookie("").isEmpty());
-            assertTrue(Auth.mrAtCookie("foo=1; bar=2").isEmpty());
-            assertTrue(Auth.mrAtCookie("mr_at=").isEmpty());
+            assertTrue(Auth.mrAtCookie(null, APP_ID).isEmpty());
+            assertTrue(Auth.mrAtCookie("", APP_ID).isEmpty());
+            assertTrue(Auth.mrAtCookie("foo=1; bar=2", APP_ID).isEmpty());
+            assertTrue(Auth.mrAtCookie(COOKIE_NAME + "=", APP_ID).isEmpty());
         }
     }
 
@@ -201,6 +216,7 @@ class AuthTest {
         void returnsEmptyWhenSubMissing() throws Exception {
             long now = System.currentTimeMillis() / 1000;
             JWTClaimsSet claims = new JWTClaimsSet.Builder()
+                    .audience(APP_ID)
                     .issueTime(new Date(now * 1000))
                     .expirationTime(new Date((now + 300) * 1000))
                     .build();
@@ -210,6 +226,16 @@ class AuthTest {
             SignedJWT jwt = new SignedJWT(header, claims);
             jwt.sign(new ECDSASigner(signingKey));
             assertTrue(Auth.verifyToken(jwt.serialize(), baseUrl, WORKSPACE, APP_ID).isEmpty());
+        }
+
+        @Test
+        void rejectsTokenMintedForDifferentApp() throws Exception {
+            // Cross-app cookie ride-along: a token with aud=app_other
+            // must not authenticate a request landing on the middleware
+            // configured for APP_ID. Catches sibling-subdomain cookie
+            // reuse between two ManyRows apps on the same eTLD.
+            String tok = signToken("user_xyz", 300, "app_other");
+            assertTrue(Auth.verifyToken(tok, baseUrl, WORKSPACE, APP_ID).isEmpty());
         }
     }
 
@@ -227,7 +253,7 @@ class AuthTest {
                     .algorithm(JWSAlgorithm.ES256)
                     .generate();
             JWKSource<SecurityContext> src = new ImmutableJWKSet<>(new JWKSet(other.toPublicJWK()));
-            assertTrue(Auth.verifyToken(tok, src).isEmpty());
+            assertTrue(Auth.verifyToken(tok, APP_ID, src).isEmpty());
         }
 
         @Test
@@ -259,7 +285,7 @@ class AuthTest {
 
             JWKSource<SecurityContext> src = new ImmutableJWKSet<>(
                     new JWKSet(List.of(keyA.toPublicJWK())));
-            assertTrue(Auth.verifyToken(jwt.serialize(), src).isEmpty());
+            assertTrue(Auth.verifyToken(jwt.serialize(), APP_ID, src).isEmpty());
         }
     }
 
@@ -277,7 +303,7 @@ class AuthTest {
     @Test
     void mrAtCookieDistinguishesEmptyValueFromAbsent() {
         // Cookie present but empty value → empty Optional (not "string").
-        Optional<String> empty = Auth.mrAtCookie("mr_at=");
+        Optional<String> empty = Auth.mrAtCookie("mr_at_app_123=", APP_ID);
         assertFalse(empty.isPresent());
     }
 

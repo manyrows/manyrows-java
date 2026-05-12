@@ -36,18 +36,25 @@ public final class Auth {
     static final String USER_AGENT = "manyrows-java-auth/1.0";
 
     /**
-     * Mirrors manyrows-core's {@code clientauth.AccessCookieName()}.
-     * Duplicated here rather than imported because manyrows-java doesn't
-     * depend on the core repo. Keep in sync if the server-side name
-     * ever changes.
+     * Cookie name prefix; the full name is {@code "mr_at_" + appId}. Per-app
+     * naming keeps two ManyRows apps on the same eTLD from colliding in the
+     * browser cookie jar. Mirrors manyrows-core's
+     * {@code clientauth.AccessCookieName(appID)} — duplicated here rather
+     * than imported because manyrows-java doesn't depend on the core repo.
+     * Keep in sync if the server-side naming ever changes.
      */
-    static final String ACCESS_COOKIE_NAME = "mr_at";
+    static final String ACCESS_COOKIE_PREFIX = "mr_at_";
+
+    static String accessCookieName(String appId) {
+        return ACCESS_COOKIE_PREFIX + appId;
+    }
 
     /**
-     * Module-level cache keyed by JWKS URL. Each entry holds a fully
-     * configured Nimbus JWT processor — JWKS fetcher, ES256 verifier,
-     * standard claim checks. Sharing one processor across calls means
-     * concurrent verifications hit the same in-memory key cache.
+     * Module-level cache keyed by "<jwksUrl>::<appId>". Each entry holds a
+     * fully configured Nimbus JWT processor — JWKS fetcher, ES256 verifier,
+     * standard claim checks bound to the app-specific aud expectation.
+     * Sharing one processor across calls means concurrent verifications
+     * hit the same in-memory key cache.
      */
     private static final Map<String, ConfigurableJWTProcessor<SecurityContext>> PROCESSORS =
             new ConcurrentHashMap<>();
@@ -59,13 +66,17 @@ public final class Auth {
      *
      * @return Optional containing the user ID ({@code sub} claim) on
      *         success; empty if the token is empty, malformed,
-     *         expired, or fails signature verification. Caller should
-     *         treat empty as "not authenticated" and 401 the request.
+     *         expired, fails signature verification, or carries an
+     *         {@code aud} claim that doesn't include {@code appId}.
+     *         Caller should treat empty as "not authenticated" and
+     *         401 the request.
      *
-     * <p>{@code workspaceSlug} and {@code appId} are accepted for
-     * source-compat with the previous {@code /a/me}-based API and
-     * forward-compat (e.g. a future audience check); the local-verify
-     * path doesn't currently use them.
+     * <p>The {@code aud} check catches the cross-app cookie ride-along
+     * between two ManyRows apps on the same eTLD — a token minted for
+     * one app is rejected by another app's middleware.
+     *
+     * <p>{@code workspaceSlug} is currently unused; kept on the signature
+     * for forward-compat (e.g. a future per-workspace check).
      */
     public static Optional<String> verifyToken(
             String token,
@@ -73,12 +84,12 @@ public final class Auth {
             String workspaceSlug,
             String appId
     ) {
-        if (token == null || token.isEmpty()) {
+        if (token == null || token.isEmpty() || appId == null || appId.isEmpty()) {
             return Optional.empty();
         }
         ConfigurableJWTProcessor<SecurityContext> processor;
         try {
-            processor = processorFor(baseUrl);
+            processor = processorFor(baseUrl, appId);
         } catch (MalformedURLException e) {
             return Optional.empty();
         }
@@ -87,8 +98,8 @@ public final class Auth {
             String sub = claims.getSubject();
             return (sub != null && !sub.isEmpty()) ? Optional.of(sub) : Optional.empty();
         } catch (Exception e) {
-            // Bad signature, expired, malformed, unknown kid, etc. —
-            // all collapse to "not authenticated."
+            // Bad signature, expired, audience mismatch, malformed,
+            // unknown kid, etc. — all collapse to "not authenticated."
             return Optional.empty();
         }
     }
@@ -100,12 +111,13 @@ public final class Auth {
      */
     static Optional<String> verifyToken(
             String token,
+            String appId,
             JWKSource<SecurityContext> jwkSource
     ) {
-        if (token == null || token.isEmpty()) {
+        if (token == null || token.isEmpty() || appId == null || appId.isEmpty()) {
             return Optional.empty();
         }
-        ConfigurableJWTProcessor<SecurityContext> processor = newProcessor(jwkSource);
+        ConfigurableJWTProcessor<SecurityContext> processor = newProcessor(jwkSource, appId);
         try {
             JWTClaimsSet claims = processor.process(token, null);
             String sub = claims.getSubject();
@@ -115,10 +127,13 @@ public final class Auth {
         }
     }
 
-    private static ConfigurableJWTProcessor<SecurityContext> processorFor(String baseUrl)
+    private static ConfigurableJWTProcessor<SecurityContext> processorFor(String baseUrl, String appId)
             throws MalformedURLException {
         String jwksUrl = stripTrailingSlashes(baseUrl) + "/.well-known/jwks.json";
-        ConfigurableJWTProcessor<SecurityContext> cached = PROCESSORS.get(jwksUrl);
+        // Cache key includes appId so two apps on the same install get
+        // separate processors with their own aud expectations.
+        String cacheKey = jwksUrl + "::" + appId;
+        ConfigurableJWTProcessor<SecurityContext> cached = PROCESSORS.get(cacheKey);
         if (cached != null) {
             return cached;
         }
@@ -128,18 +143,23 @@ public final class Auth {
         // cached, the loser is GC'd.
         URL url = new URL(jwksUrl);
         JWKSource<SecurityContext> source = JWKSourceBuilder.create(url).retrying(true).build();
-        ConfigurableJWTProcessor<SecurityContext> processor = newProcessor(source);
-        ConfigurableJWTProcessor<SecurityContext> existing = PROCESSORS.putIfAbsent(jwksUrl, processor);
+        ConfigurableJWTProcessor<SecurityContext> processor = newProcessor(source, appId);
+        ConfigurableJWTProcessor<SecurityContext> existing = PROCESSORS.putIfAbsent(cacheKey, processor);
         return existing != null ? existing : processor;
     }
 
     private static ConfigurableJWTProcessor<SecurityContext> newProcessor(
-            JWKSource<SecurityContext> source
+            JWKSource<SecurityContext> source,
+            String appId
     ) {
         DefaultJWTProcessor<SecurityContext> processor = new DefaultJWTProcessor<>();
         processor.setJWSKeySelector(new JWSVerificationKeySelector<>(JWSAlgorithm.ES256, source));
-        // Default verifier checks exp/nbf with 60s leeway.
-        processor.setJWTClaimsSetVerifier(new DefaultJWTClaimsVerifier<>(null, null));
+        // Default verifier checks exp/nbf with 60s leeway. Pass the
+        // expected audience (a Set<String> with the single appId) so
+        // Nimbus rejects tokens minted for a different app.
+        processor.setJWTClaimsSetVerifier(
+                new DefaultJWTClaimsVerifier<SecurityContext>(appId, null, null)
+        );
         return processor;
     }
 
@@ -166,24 +186,28 @@ public final class Auth {
     }
 
     /**
-     * Extract the {@code mr_at} session cookie from a Cookie header
-     * value. Used as a fallback when the SDK is in cookie mode and no
-     * Authorization header is present.
+     * Extract the {@code mr_at_<appId>} session cookie from a Cookie
+     * header value. Used as a fallback when the SDK is in cookie mode
+     * and no Authorization header is present. The cookie name is
+     * per-app so two ManyRows apps on the same eTLD don't collide —
+     * pass the configured {@code appId} to read the right one.
      *
      * @return Optional containing the cookie value, or empty when
      *         absent / malformed / empty.
      */
-    public static Optional<String> mrAtCookie(String cookieHeaderValue) {
-        if (cookieHeaderValue == null || cookieHeaderValue.isEmpty()) {
+    public static Optional<String> mrAtCookie(String cookieHeaderValue, String appId) {
+        if (cookieHeaderValue == null || cookieHeaderValue.isEmpty()
+                || appId == null || appId.isEmpty()) {
             return Optional.empty();
         }
+        String target = accessCookieName(appId);
         for (String raw : cookieHeaderValue.split(";")) {
             int eq = raw.indexOf('=');
             if (eq < 0) {
                 continue;
             }
             String name = raw.substring(0, eq).trim();
-            if (!name.equals(ACCESS_COOKIE_NAME)) {
+            if (!name.equals(target)) {
                 continue;
             }
             String value = raw.substring(eq + 1).trim();
