@@ -27,8 +27,10 @@ import java.util.Date;
 import java.util.List;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -92,10 +94,15 @@ class AuthTest {
     }
 
     private String signToken(String sub, long expSecondsFromNow, String aud) throws JOSEException {
+        return signToken(sub, expSecondsFromNow, aud, baseUrl);
+    }
+
+    private String signToken(String sub, long expSecondsFromNow, String aud, String iss) throws JOSEException {
         long now = System.currentTimeMillis() / 1000;
         JWTClaimsSet claims = new JWTClaimsSet.Builder()
                 .subject(sub)
                 .audience(aud)
+                .issuer(iss)
                 .issueTime(new Date(now * 1000))
                 .expirationTime(new Date((now + expSecondsFromNow) * 1000))
                 .build();
@@ -236,6 +243,44 @@ class AuthTest {
             // reuse between two ManyRows apps on the same eTLD.
             String tok = signToken("user_xyz", 300, "app_other");
             assertTrue(Auth.verifyToken(tok, baseUrl, WORKSPACE, APP_ID).isEmpty());
+        }
+
+        @Test
+        void rejectsIssMismatch() throws Exception {
+            // iss check: a token signed by this install but claiming
+            // a different issuer must be rejected. Defends against
+            // cross-install replay if a signing key ever leaked across
+            // deployments.
+            String tok = signToken("user_xyz", 300, APP_ID, "https://other-install.example.com");
+            assertTrue(Auth.verifyToken(tok, baseUrl, WORKSPACE, APP_ID).isEmpty());
+        }
+
+        @Test
+        void toleratesTrailingSlashOnIss() throws Exception {
+            // iss with a trailing slash matches a baseUrl without one
+            // (and vice versa) — operator shouldn't have to think
+            // about which form the server emits.
+            String tok = signToken("user_xyz", 300, APP_ID, baseUrl + "/");
+            assertEquals(Optional.of("user_xyz"),
+                    Auth.verifyToken(tok, baseUrl, WORKSPACE, APP_ID));
+        }
+
+        @Test
+        void rejectsPlainHttpBaseUrl() {
+            // H5: plaintext JWKS fetches are MITM-able. Misconfigured
+            // baseURL is a fatal config error, not a per-request
+            // failure mode — surfaces as IllegalArgumentException so
+            // the deploy fails at first verify.
+            assertThrows(IllegalArgumentException.class,
+                    () -> Auth.verifyToken("any.token.value", "http://app.example.com", WORKSPACE, APP_ID));
+        }
+
+        @Test
+        void allowsLocalhostHttpForDev() {
+            // Localhost loops are routinely plaintext; allow them so
+            // dev iterations don't need self-signed certs.
+            assertDoesNotThrow(() ->
+                    Auth.verifyToken("any.token.value", "http://localhost:8080", WORKSPACE, APP_ID));
         }
     }
 

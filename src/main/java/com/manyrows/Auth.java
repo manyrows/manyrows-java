@@ -35,6 +35,12 @@ public final class Auth {
 
     static final String USER_AGENT = "manyrows-java-auth/1.0";
 
+    /** JWKS cache lifespan (ms) — aligned with Go/Node/Python SDKs at 10 minutes. */
+    private static final long JWKS_CACHE_LIFESPAN_MS = 10L * 60L * 1000L;
+
+    /** JWKS refetch timeout (ms) — Nimbus default; bounds the wait when a refetch races. */
+    private static final long JWKS_REFRESH_TIMEOUT_MS = 30L * 1000L;
+
     /**
      * Cookie name prefix; the full name is {@code "mr_at_" + appId}. Per-app
      * naming keeps two ManyRows apps on the same eTLD from colliding in the
@@ -84,6 +90,10 @@ public final class Auth {
             String workspaceSlug,
             String appId
     ) {
+        // Reject baseURLs that would make JWKS fetches MITM-able. This
+        // is a fatal config error, not a per-request failure mode — an
+        // IllegalArgumentException surfaces it loudly at first verify.
+        requireSecureBaseUrl(baseUrl);
         if (token == null || token.isEmpty() || appId == null || appId.isEmpty()) {
             return Optional.empty();
         }
@@ -95,6 +105,14 @@ public final class Auth {
         }
         try {
             JWTClaimsSet claims = processor.process(token, null);
+            // iss check: defence-in-depth against cross-install token
+            // replay. Signature already binds the token to the install,
+            // but if a signing key ever leaked across deployments —
+            // operator error, "promoted from staging," whatever — this
+            // catch surfaces it. Trailing-slash tolerant.
+            if (!issMatches(claims.getIssuer(), baseUrl)) {
+                return Optional.empty();
+            }
             String sub = claims.getSubject();
             return (sub != null && !sub.isEmpty()) ? Optional.of(sub) : Optional.empty();
         } catch (Exception e) {
@@ -102,6 +120,44 @@ public final class Auth {
             // unknown kid, etc. — all collapse to "not authenticated."
             return Optional.empty();
         }
+    }
+
+    /**
+     * Reject baseURLs that would make JWKS fetches MITM-able. Only
+     * {@code https://} is accepted, with the usual localhost /
+     * 127.0.0.1 / [::1] dev exceptions so local round-trips don't
+     * force operators into self-signed cert dances. Throws
+     * IllegalArgumentException so a misconfigured deploy fails at
+     * first verify rather than silently accepting forged keys.
+     */
+    static void requireSecureBaseUrl(String raw) {
+        if (raw == null || raw.isBlank()) {
+            throw new IllegalArgumentException("manyrows auth: baseUrl is empty");
+        }
+        String s = raw.trim().toLowerCase();
+        if (s.startsWith("https://")) {
+            return;
+        }
+        if (s.startsWith("http://localhost")
+                || s.startsWith("http://127.0.0.1")
+                || s.startsWith("http://[::1]")) {
+            return;
+        }
+        throw new IllegalArgumentException(
+                "manyrows auth: baseUrl must use https:// (got \"" + raw
+                        + "\") — refusing to fetch JWKS over plaintext"
+        );
+    }
+
+    /**
+     * Compare the JWT's iss claim to the configured baseUrl,
+     * tolerating an optional trailing "/" on either side.
+     */
+    static boolean issMatches(String claim, String expected) {
+        if (claim == null) {
+            return false;
+        }
+        return stripTrailingSlashes(claim).equals(stripTrailingSlashes(expected));
     }
 
     /**
@@ -142,7 +198,16 @@ public final class Auth {
         // benign — both build the same processor; whichever wins gets
         // cached, the loser is GC'd.
         URL url = new URL(jwksUrl);
-        JWKSource<SecurityContext> source = JWKSourceBuilder.create(url).retrying(true).build();
+        // Aligned with the other-language SDKs at a 10-minute JWKS
+        // cache lifespan. Nimbus's default is shorter (~5 min) which
+        // is also safe, but explicit is preferable so a future Nimbus
+        // upgrade can't surprise an operator who relied on rotation
+        // timing. The 30-second refreshTimeout matches Nimbus's
+        // default and bounds the wait when a refetch races.
+        JWKSource<SecurityContext> source = JWKSourceBuilder.create(url)
+                .cache(JWKS_CACHE_LIFESPAN_MS, JWKS_REFRESH_TIMEOUT_MS)
+                .retrying(true)
+                .build();
         ConfigurableJWTProcessor<SecurityContext> processor = newProcessor(source, appId);
         ConfigurableJWTProcessor<SecurityContext> existing = PROCESSORS.putIfAbsent(cacheKey, processor);
         return existing != null ? existing : processor;
