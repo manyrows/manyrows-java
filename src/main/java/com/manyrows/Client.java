@@ -60,7 +60,7 @@ import java.util.Map;
  */
 public class Client {
 
-    static final String USER_AGENT = "manyrows-java/1.0";
+    static final String USER_AGENT = "manyrows-auth-java/1.0";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

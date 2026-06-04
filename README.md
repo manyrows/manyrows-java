@@ -1,4 +1,4 @@
-# manyrows-java
+# manyrows-auth-java
 
 Official Java SDK for [ManyRows](https://manyrows.com). Mirrors the surface of [`manyrows-go`](https://github.com/manyrows/manyrows-go), [`@manyrows/manyrows-node`](https://www.npmjs.com/package/@manyrows/manyrows-node), and [`manyrows-python`](https://github.com/manyrows/manyrows-python).
 
@@ -33,10 +33,10 @@ Copy the files in `src/main/java/com/manyrows/` into your project. There are 5: 
 ### Build a JAR locally
 
 ```bash
-git clone https://github.com/manyrows/manyrows-java.git
-cd manyrows-java
+git clone https://github.com/manyrows/manyrows-auth-java.git
+cd manyrows-auth-java
 mvn package
-# target/manyrows-java-1.0.0.jar
+# target/manyrows-auth-java-1.0.0.jar
 ```
 
 ## Client

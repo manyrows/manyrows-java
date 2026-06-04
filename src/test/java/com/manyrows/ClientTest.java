@@ -119,7 +119,7 @@ class ClientTest {
             client(t).getDelivery();
             var headers = t.captured().get(0).headers().map();
             assertEquals("mr_test_key", headers.get("X-API-Key").get(0));
-            assertTrue(headers.get("User-Agent").get(0).startsWith("manyrows-java/"));
+            assertTrue(headers.get("User-Agent").get(0).startsWith("manyrows-auth-java/"));
             assertEquals("application/json", headers.get("Accept").get(0));
         }
     }

@@ -33,7 +33,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class Auth {
 
-    static final String USER_AGENT = "manyrows-java-auth/1.0";
+    static final String USER_AGENT = "manyrows-auth-java-auth/1.0";
 
     /** JWKS cache lifespan (ms) — aligned with Go/Node/Python SDKs at 10 minutes. */
     private static final long JWKS_CACHE_LIFESPAN_MS = 10L * 60L * 1000L;
@@ -46,7 +46,7 @@ public final class Auth {
      * naming keeps two ManyRows apps on the same eTLD from colliding in the
      * browser cookie jar. Mirrors manyrows-core's
      * {@code clientauth.AccessCookieName(appID)} — duplicated here rather
-     * than imported because manyrows-java doesn't depend on the core repo.
+     * than imported because manyrows-auth-java doesn't depend on the core repo.
      * Keep in sync if the server-side naming ever changes.
      */
     static final String ACCESS_COOKIE_PREFIX = "mr_at_";
