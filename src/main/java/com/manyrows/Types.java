@@ -235,6 +235,90 @@ public final class Types {
             String lastUsedAt
     ) {}
 
+    // ===== Organizations =====
+
+    /** An app-scoped tenant. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Organization(
+            String id,
+            String appId,
+            String name,
+            String slug,
+            String status,
+            String createdAt
+    ) {}
+
+    /** One of a user's organizations + their tier ({@link Client#listOrganizationsForUser}). */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record OrgMembership(
+            String id,
+            String name,
+            String slug,
+            String orgRole
+    ) {}
+
+    /**
+     * A member of an organization. {@code email} is populated by the member
+     * list/add responses; the lightweight membership gate omits it.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record OrgMember(
+            String userId,
+            String email,
+            String orgRole,
+            String status
+    ) {}
+
+    /** A pending organization invitation. {@code invitedByEmail} may be {@code null}. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record OrgInvite(
+            String id,
+            String email,
+            String orgRole,
+            String status,
+            String invitedByEmail,
+            String createdAt,
+            String expiresAt
+    ) {}
+
+    /** Request body for {@link Client#createOrganization}; {@code slug} is optional. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record CreateOrganizationInput(
+            String name,
+            String slug,
+            String ownerUserId
+    ) {}
+
+    /** Patch body for {@link Client#updateOrganization}; {@code null} fields are left unchanged. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record UpdateOrganizationInput(
+            String name,
+            String slug
+    ) {}
+
+    /**
+     * Request body for {@link Client#addOrganizationMember}. Identify the user by
+     * {@code userId} or {@code email} (one of the two); the other may be {@code null}.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record AddOrgMemberInput(
+            String userId,
+            String email,
+            String orgRole
+    ) {}
+
+    /**
+     * Request body for {@link Client#createOrganizationInvite}. Only {@code email}
+     * is required; {@code null} optional fields are omitted.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record CreateOrgInviteInput(
+            String email,
+            String orgRole,
+            List<String> roleIds,
+            String invitedByUserId
+    ) {}
+
     // ===== Roles & Permissions (authorization catalog) =====
 
     /** A role and the permission slugs it grants. */

@@ -1,13 +1,21 @@
 package com.manyrows;
 
+import com.manyrows.Types.AddOrgMemberInput;
 import com.manyrows.Types.AuthLogsPage;
 import com.manyrows.Types.BatchUserResult;
 import com.manyrows.Types.ConfigKey;
 import com.manyrows.Types.ConfigKeyInput;
+import com.manyrows.Types.CreateOrgInviteInput;
+import com.manyrows.Types.CreateOrganizationInput;
 import com.manyrows.Types.CreateUserResult;
 import com.manyrows.Types.Delivery;
 import com.manyrows.Types.FeatureFlagOverride;
 import com.manyrows.Types.MembersResult;
+import com.manyrows.Types.OrgInvite;
+import com.manyrows.Types.OrgMember;
+import com.manyrows.Types.OrgMembership;
+import com.manyrows.Types.Organization;
+import com.manyrows.Types.UpdateOrganizationInput;
 import com.manyrows.Types.PermissionResult;
 import com.manyrows.Types.RoleSummary;
 import com.manyrows.Types.Session;
@@ -120,6 +128,7 @@ class ClientTest {
             var headers = t.captured().get(0).headers().map();
             assertEquals("mr_test_key", headers.get("X-API-Key").get(0));
             assertTrue(headers.get("User-Agent").get(0).startsWith("manyrows-auth-java/"));
+            assertEquals("manyrows-auth-java/" + Client.VERSION, headers.get("User-Agent").get(0));
             assertEquals("application/json", headers.get("Accept").get(0));
         }
     }
@@ -571,6 +580,224 @@ class ClientTest {
             assertTrue(url.contains("since=2026-01-01"));
             assertTrue(url.contains("outcome=success"));
             assertFalse(url.contains("until="));
+        }
+    }
+
+    // ===== Organizations =====
+
+    @Nested
+    class Organizations {
+
+        @Test
+        void createOrganizationPostsBodyAndOmitsNullSlug() {
+            MockTransport t = new MockTransport(List.of(MockTransport.Reply.status(201,
+                    "{\"id\":\"o1\",\"appId\":\"app_123\",\"name\":\"Acme\",\"slug\":\"acme\"," +
+                            "\"status\":\"active\",\"createdAt\":\"2026-06-07T00:00:00Z\"}"
+            )));
+            Organization org = client(t).createOrganization(new CreateOrganizationInput("Acme", null, "u1"));
+            assertEquals("o1", org.id());
+            assertEquals("active", org.status());
+            HttpRequest req = t.captured().get(0);
+            assertEquals("POST", req.method());
+            assertTrue(req.uri().toString().endsWith("/organizations"));
+            String body = t.body(0);
+            assertTrue(body.contains("\"name\":\"Acme\""));
+            assertTrue(body.contains("\"ownerUserId\":\"u1\""));
+            assertFalse(body.contains("slug"));
+        }
+
+        @Test
+        void listOrganizationsForUserSendsQueryAndUnwrapsEnvelope() {
+            MockTransport t = new MockTransport(List.of(MockTransport.Reply.ok(
+                    "{\"organizations\":[{\"id\":\"o1\",\"name\":\"Acme\",\"slug\":\"acme\",\"orgRole\":\"owner\"}]}"
+            )));
+            List<OrgMembership> orgs = client(t).listOrganizationsForUser("u1");
+            assertEquals(1, orgs.size());
+            assertEquals("owner", orgs.get(0).orgRole());
+            String url = t.captured().get(0).uri().toString();
+            assertTrue(url.contains("/organizations?"));
+            assertTrue(url.contains("userId=u1"));
+        }
+
+        @Test
+        void getOrganizationNotFoundSurfacesStableCode() {
+            MockTransport t = new MockTransport(List.of(
+                    MockTransport.Reply.status(404, "{\"error\":\"error.notFound\"}")
+            ));
+            ManyRowsException ex = assertThrows(ManyRowsException.class, () -> client(t).getOrganization("o1"));
+            assertEquals(404, ex.getStatus());
+            assertEquals(ManyRowsException.CODE_NOT_FOUND, ex.getCode());
+            assertTrue(ex.hasCode(ManyRowsException.CODE_NOT_FOUND));
+            assertTrue(ManyRowsException.isCode(ex, ManyRowsException.CODE_NOT_FOUND));
+            assertFalse(ManyRowsException.isCode(ex, ManyRowsException.CODE_CONFLICT));
+            assertTrue(t.captured().get(0).uri().toString().endsWith("/organizations/o1"));
+        }
+
+        @Test
+        void updateOrganizationPatchOmitsNullFields() {
+            MockTransport t = new MockTransport(List.of(MockTransport.Reply.ok(
+                    "{\"id\":\"o1\",\"appId\":\"app_123\",\"name\":\"Renamed\",\"slug\":\"acme\",\"status\":\"active\"}"
+            )));
+            Organization org = client(t).updateOrganization("o1", new UpdateOrganizationInput("Renamed", null));
+            assertEquals("Renamed", org.name());
+            HttpRequest req = t.captured().get(0);
+            assertEquals("PATCH", req.method());
+            assertTrue(req.uri().toString().endsWith("/organizations/o1"));
+            assertEquals("{\"name\":\"Renamed\"}", t.body(0));
+        }
+
+        @Test
+        void deleteOrganizationSendsActorUserIdQueryParam() {
+            MockTransport t = new MockTransport(List.of(MockTransport.Reply.status(204, "")));
+            client(t).deleteOrganization("o1", "actor-1");
+            HttpRequest req = t.captured().get(0);
+            assertEquals("DELETE", req.method());
+            assertTrue(req.uri().toString().endsWith("/organizations/o1?actorUserId=actor-1"));
+        }
+
+        @Test
+        void escapesOrgIdPathSegment() {
+            MockTransport t = new MockTransport(List.of(
+                    MockTransport.Reply.status(404, "{\"error\":\"error.notFound\"}")
+            ));
+            assertThrows(ManyRowsException.class, () -> client(t).getOrganization("a b/c"));
+            assertTrue(t.captured().get(0).uri().toString().endsWith("/organizations/a%20b%2Fc"));
+        }
+    }
+
+    // ===== Organization members =====
+
+    @Nested
+    class OrganizationMembers {
+
+        @Test
+        void addMemberByEmailSurfacesUserNotSignedIn() {
+            MockTransport t = new MockTransport(List.of(
+                    MockTransport.Reply.status(409, "{\"error\":\"error.userNotSignedIn\"}")
+            ));
+            ManyRowsException ex = assertThrows(ManyRowsException.class,
+                    () -> client(t).addOrganizationMember("o1", new AddOrgMemberInput(null, "x@y.com", "admin")));
+            assertTrue(ManyRowsException.isCode(ex, ManyRowsException.CODE_USER_NOT_SIGNED_IN));
+            assertTrue(t.captured().get(0).uri().toString().endsWith("/organizations/o1/members"));
+        }
+
+        @Test
+        void addMemberByEmailPostsBodyWithoutUserId() {
+            MockTransport t = new MockTransport(List.of(MockTransport.Reply.status(201,
+                    "{\"userId\":\"u2\",\"email\":\"x@y.com\",\"orgRole\":\"admin\",\"status\":\"active\"}"
+            )));
+            OrgMember m = client(t).addOrganizationMember("o1", new AddOrgMemberInput(null, "x@y.com", "admin"));
+            assertEquals("u2", m.userId());
+            assertEquals("admin", m.orgRole());
+            assertEquals("POST", t.captured().get(0).method());
+            String body = t.body(0);
+            assertTrue(body.contains("\"email\":\"x@y.com\""));
+            assertTrue(body.contains("\"orgRole\":\"admin\""));
+            assertFalse(body.contains("userId"));
+        }
+
+        @Test
+        void listAndGetMembers() {
+            MockTransport t = new MockTransport(List.of(
+                    MockTransport.Reply.ok(
+                            "{\"members\":[{\"userId\":\"u2\",\"email\":\"x@y.com\",\"orgRole\":\"admin\",\"status\":\"active\"}]}"),
+                    MockTransport.Reply.ok(
+                            "{\"userId\":\"u2\",\"orgRole\":\"admin\",\"status\":\"active\"}")
+            ));
+            Client c = client(t);
+            List<OrgMember> list = c.listOrganizationMembers("o1");
+            assertEquals(1, list.size());
+            assertEquals("x@y.com", list.get(0).email());
+            assertTrue(t.captured().get(0).uri().toString().endsWith("/organizations/o1/members"));
+
+            OrgMember m = c.getOrganizationMember("o1", "u2");
+            assertEquals("admin", m.orgRole());
+            assertTrue(t.captured().get(1).uri().toString().endsWith("/organizations/o1/members/u2"));
+        }
+
+        @Test
+        void setRolePatchesBodyAndSurfacesConflict() {
+            MockTransport t = new MockTransport(List.of(
+                    MockTransport.Reply.status(409, "{\"error\":\"error.conflict\"}")
+            ));
+            ManyRowsException ex = assertThrows(ManyRowsException.class,
+                    () -> client(t).setOrganizationMemberRole("o1", "u2", "member"));
+            assertTrue(ManyRowsException.isCode(ex, ManyRowsException.CODE_CONFLICT));
+            HttpRequest req = t.captured().get(0);
+            assertEquals("PATCH", req.method());
+            assertTrue(req.uri().toString().endsWith("/organizations/o1/members/u2"));
+            assertEquals("{\"orgRole\":\"member\"}", t.body(0));
+        }
+
+        @Test
+        void removeMemberSurfacesConflictForLastOwner() {
+            MockTransport t = new MockTransport(List.of(
+                    MockTransport.Reply.status(409, "{\"error\":\"error.conflict\"}")
+            ));
+            ManyRowsException ex = assertThrows(ManyRowsException.class,
+                    () -> client(t).removeOrganizationMember("o1", "u2"));
+            assertTrue(ManyRowsException.isCode(ex, ManyRowsException.CODE_CONFLICT));
+            HttpRequest req = t.captured().get(0);
+            assertEquals("DELETE", req.method());
+            assertTrue(req.uri().toString().endsWith("/organizations/o1/members/u2"));
+        }
+    }
+
+    // ===== Organization invites =====
+
+    @Nested
+    class OrganizationInvites {
+
+        @Test
+        void createInviteIncludesOptionalFieldsWhenSet() {
+            MockTransport t = new MockTransport(List.of(MockTransport.Reply.status(201,
+                    "{\"id\":\"i1\",\"email\":\"x@y.com\",\"orgRole\":\"admin\",\"status\":\"pending\"," +
+                            "\"createdAt\":\"t\",\"expiresAt\":\"t2\"}"
+            )));
+            OrgInvite inv = client(t).createOrganizationInvite("o1",
+                    new CreateOrgInviteInput("x@y.com", "admin", List.of("r_1"), "u1"));
+            assertEquals("i1", inv.id());
+            assertEquals("pending", inv.status());
+            HttpRequest req = t.captured().get(0);
+            assertEquals("POST", req.method());
+            assertTrue(req.uri().toString().endsWith("/organizations/o1/invites"));
+            String body = t.body(0);
+            assertTrue(body.contains("\"email\":\"x@y.com\""));
+            assertTrue(body.contains("\"orgRole\":\"admin\""));
+            assertTrue(body.contains("\"roleIds\":[\"r_1\"]"));
+            assertTrue(body.contains("\"invitedByUserId\":\"u1\""));
+        }
+
+        @Test
+        void createInviteOmitsUnsetOptionalFields() {
+            MockTransport t = new MockTransport(List.of(
+                    MockTransport.Reply.status(409, "{\"error\":\"error.invitePending\"}")
+            ));
+            ManyRowsException ex = assertThrows(ManyRowsException.class,
+                    () -> client(t).createOrganizationInvite("o1",
+                            new CreateOrgInviteInput("x@y.com", null, null, null)));
+            assertTrue(ManyRowsException.isCode(ex, ManyRowsException.CODE_INVITE_PENDING));
+            assertEquals("{\"email\":\"x@y.com\"}", t.body(0));
+        }
+
+        @Test
+        void listAndRevokeInvites() {
+            MockTransport t = new MockTransport(List.of(
+                    MockTransport.Reply.ok(
+                            "{\"invites\":[{\"id\":\"i1\",\"email\":\"x@y.com\",\"orgRole\":\"admin\"," +
+                                    "\"status\":\"pending\",\"createdAt\":\"t\",\"expiresAt\":\"t2\"}]}"),
+                    MockTransport.Reply.status(204, "")
+            ));
+            Client c = client(t);
+            List<OrgInvite> list = c.listOrganizationInvites("o1");
+            assertEquals(1, list.size());
+            assertEquals("x@y.com", list.get(0).email());
+            assertTrue(t.captured().get(0).uri().toString().endsWith("/organizations/o1/invites"));
+
+            c.revokeOrganizationInvite("o1", "i1");
+            HttpRequest req = t.captured().get(1);
+            assertEquals("DELETE", req.method());
+            assertTrue(req.uri().toString().endsWith("/organizations/o1/invites/i1"));
         }
     }
 

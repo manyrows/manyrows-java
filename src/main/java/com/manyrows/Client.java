@@ -2,11 +2,14 @@ package com.manyrows;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.manyrows.Types.AddOrgMemberInput;
 import com.manyrows.Types.AuthLogsPage;
 import com.manyrows.Types.BatchUserResult;
 import com.manyrows.Types.ConfigKey;
 import com.manyrows.Types.ConfigKeyInput;
 import com.manyrows.Types.ConfigKeyUpdate;
+import com.manyrows.Types.CreateOrgInviteInput;
+import com.manyrows.Types.CreateOrganizationInput;
 import com.manyrows.Types.CreateUserResult;
 import com.manyrows.Types.Delivery;
 import com.manyrows.Types.FeatureFlagDefinition;
@@ -16,12 +19,17 @@ import com.manyrows.Types.FeatureFlagUpdate;
 import com.manyrows.Types.Identity;
 import com.manyrows.Types.MagicLinkResult;
 import com.manyrows.Types.MembersResult;
+import com.manyrows.Types.OrgInvite;
+import com.manyrows.Types.OrgMember;
+import com.manyrows.Types.OrgMembership;
+import com.manyrows.Types.Organization;
 import com.manyrows.Types.Passkey;
 import com.manyrows.Types.PermissionResult;
 import com.manyrows.Types.PermissionSummary;
 import com.manyrows.Types.RemoveUserResult;
 import com.manyrows.Types.RoleSummary;
 import com.manyrows.Types.Session;
+import com.manyrows.Types.UpdateOrganizationInput;
 import com.manyrows.Types.UserField;
 import com.manyrows.Types.UserFieldValue;
 import com.manyrows.Types.UserResult;
@@ -60,7 +68,14 @@ import java.util.Map;
  */
 public class Client {
 
-    static final String USER_AGENT = "manyrows-auth-java/1.0";
+    /**
+     * SDK version, sent as the User-Agent on every request so the server (and
+     * any proxy/WAF in front of it) can identify the client rather than
+     * treating it as an anonymous bot. Keep in sync with the pom version.
+     */
+    public static final String VERSION = "1.0.0";
+
+    static final String USER_AGENT = "manyrows-auth-java/" + VERSION;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -874,5 +889,100 @@ public class Client {
      */
     public Webhook rotateWebhookSecret(String webhookId) {
         return request("POST", "/webhooks/" + pathSegment(webhookId) + "/rotate-secret", null, null, Webhook.class);
+    }
+
+    // === Organizations ===
+
+    /** Creates an organization owned by {@code input.ownerUserId()}. */
+    public Organization createOrganization(CreateOrganizationInput input) {
+        return request("POST", "/organizations", null, input, Organization.class);
+    }
+
+    /** Lists the organizations a user belongs to, with their tier in each. */
+    public List<OrgMembership> listOrganizationsForUser(String userId) {
+        return getList("/organizations", Map.of("userId", userId), "organizations", OrgMembership.class);
+    }
+
+    /** Fetches one organization by ID. */
+    public Organization getOrganization(String orgId) {
+        return doGet("/organizations/" + pathSegment(orgId), null, Organization.class);
+    }
+
+    /** Patches an organization's name and/or slug ({@code null} fields are left unchanged). */
+    public Organization updateOrganization(String orgId, UpdateOrganizationInput patch) {
+        return request("PATCH", "/organizations/" + pathSegment(orgId), null, patch, Organization.class);
+    }
+
+    /**
+     * Hard-deletes an org. The auth server enforces owner-only deletion:
+     * {@code actorUserId} names the acting end-user, who must be an active owner
+     * of the org, or the call is rejected (400 if empty, 403 if not an owner).
+     */
+    public void deleteOrganization(String orgId, String actorUserId) {
+        send("DELETE", "/organizations/" + pathSegment(orgId), Map.of("actorUserId", actorUserId), null);
+    }
+
+    // === Organization members ===
+
+    /** Lists an organization's members. */
+    public List<OrgMember> listOrganizationMembers(String orgId) {
+        return getList("/organizations/" + pathSegment(orgId) + "/members", null, "members", OrgMember.class);
+    }
+
+    /** Fetches one organization member by user ID. */
+    public OrgMember getOrganizationMember(String orgId, String userId) {
+        return doGet("/organizations/" + pathSegment(orgId) + "/members/" + pathSegment(userId), null, OrgMember.class);
+    }
+
+    /**
+     * Adds a member to an organization, identified by {@code input.userId()} or
+     * {@code input.email()}. Throws a {@link ManyRowsException} with code
+     * {@link ManyRowsException#CODE_USER_NOT_SIGNED_IN} when the email has no
+     * account in the app yet.
+     */
+    public OrgMember addOrganizationMember(String orgId, AddOrgMemberInput input) {
+        return request("POST", "/organizations/" + pathSegment(orgId) + "/members", null, input, OrgMember.class);
+    }
+
+    /**
+     * Changes a member's organization tier. Throws a {@link ManyRowsException}
+     * with code {@link ManyRowsException#CODE_CONFLICT} when demoting the last
+     * owner.
+     */
+    public void setOrganizationMemberRole(String orgId, String userId, String orgRole) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("orgRole", orgRole);
+        send("PATCH", "/organizations/" + pathSegment(orgId) + "/members/" + pathSegment(userId), null, body);
+    }
+
+    /**
+     * Removes a member from an organization. Throws a {@link ManyRowsException}
+     * with code {@link ManyRowsException#CODE_CONFLICT} when removing the last
+     * owner.
+     */
+    public void removeOrganizationMember(String orgId, String userId) {
+        send("DELETE", "/organizations/" + pathSegment(orgId) + "/members/" + pathSegment(userId), null, null);
+    }
+
+    // === Organization invites ===
+
+    /**
+     * Invites an email address to an organization. Throws a
+     * {@link ManyRowsException} with code
+     * {@link ManyRowsException#CODE_INVITE_PENDING} when an invite for that
+     * email is already pending.
+     */
+    public OrgInvite createOrganizationInvite(String orgId, CreateOrgInviteInput input) {
+        return request("POST", "/organizations/" + pathSegment(orgId) + "/invites", null, input, OrgInvite.class);
+    }
+
+    /** Lists an organization's pending invites. */
+    public List<OrgInvite> listOrganizationInvites(String orgId) {
+        return getList("/organizations/" + pathSegment(orgId) + "/invites", null, "invites", OrgInvite.class);
+    }
+
+    /** Revokes a pending organization invite. */
+    public void revokeOrganizationInvite(String orgId, String inviteId) {
+        send("DELETE", "/organizations/" + pathSegment(orgId) + "/invites/" + pathSegment(inviteId), null, null);
     }
 }
